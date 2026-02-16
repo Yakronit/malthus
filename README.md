@@ -5,278 +5,123 @@ Main result: If low fertility families are below the replacement rate and high f
 
 Here is gpt summary of the model:
 
+# Branching–Infection Dynamics on a Mixing Graph
 
-Branching–Infection Dynamics on a Mixing Graph
+This project models two node types (A and B) evolving on a dynamic graph. The dynamics combine:
+- type-dependent reproduction (branching),
+- irreversible infection (B -> A),
+- locality defined via random-walk mixing,
+- graph growth that preserves local neighborhoods.
 
-This project studies a two-type evolutionary process on a dynamically expanding graph with random-walk–defined locality.
+The goal is to understand when type A dominates, when type B dominates, and when the outcome depends on initial conditions.
 
-The model combines:
+---
 
-Type-dependent reproduction
+## State
 
-Irreversible infection
+At each generation t:
+- Graph: G_t = (V_t, E_t)
+- Node type function: tau_t(v) in {A, B}
 
-Locality defined by random-walk mixing
+---
 
-Graph growth that preserves neighborhood structure
+## Mixing / Locality Parameter (k)
 
-The goal is to understand under which parameters type A dominates, type B dominates, or both coexist.
+Locality is defined using random walks.
 
-Model Overview
-Graph Structure
+For a given walk length L:
+- start at node x
+- run an L-step simple random walk
+- let y be the endpoint
 
-At each generation 
-t
-t:
+We choose L so that the expected shortest-path distance from x to y is about k:
 
-We have a graph 
-Gt=(Vt,Et)
-G
-t
-	​
+  E[ dist(x, y) ] ≈ k
 
-=(V
-t
-	​
+Interpretation:
+- small k => infection is very local
+- large k => infection is more global
 
-,E
-t
-	​
+(Note: in simulation, L is calibrated numerically so this condition holds approximately.)
 
-).
+---
 
-Each node has type 
-τt(v)∈{a,b}
-τ
-t
-	​
-
-(v)∈{a,b}.
-
-Mixing Property (parameter 
-k
-k)
-
-Locality is defined via random walks.
-
-Start at node 
-x
-x.
-
-Run an 
-L
-L-step simple random walk.
-
-Let 
-Y
-Y be the endpoint.
-
-Choose 
-L
-L so that
-
-E[d(x,Y)]≈k
-E[d(x,Y)]≈k
-
-where 
-d(⋅,⋅)
-d(⋅,⋅) is shortest-path distance.
-
-Small 
-k
-k → infection is local.
-
-Large 
-k
-k → infection is more global.
-
-Dynamics Per Generation
+## Per-Generation Dynamics
 
 Each generation consists of two stages:
 
-1. Infection (Irreversible)
+### 1) Infection (irreversible)
 
-Each node of type A performs 
-m
-m infection attempts.
+Each A-type node performs m infection attempts.
 
 For each attempt:
+- sample a target node using the random-walk endpoint distribution (defined by L, hence by k)
+- convert the target to type A
 
-Sample a node via the random-walk endpoint distribution.
+Rules:
+- A stays A
+- B becomes A
+- infection is irreversible
 
-Convert that node to type A.
+### 2) Reproduction / Graph Expansion
 
-Properties:
+Every node reproduces into same-type offspring:
+- each A node creates n A-offspring
+- each B node creates N B-offspring
 
-Infection is irreversible (B → A only).
+Offspring inherit the parent’s type.
 
-Infection locality depends on 
-k
-k.
+Edges are “lifted” locally so that offspring of neighboring parents tend to be connected, preserving locality across generations (descendants have similar random-walk neighborhoods to their parents).
 
-2. Reproduction
+---
 
-Each node reproduces into same-type offspring:
-
-Type A produces 
-n
-n offspring.
-
-Type B produces 
-N
-N offspring.
-
-Offspring inherit their parent’s type.
-
-Graph edges are lifted locally so that descendants of neighboring parents tend to remain neighbors. This preserves locality structure across generations.
-
-Competing Forces
+## Competing Forces
 
 Two mechanisms compete:
 
-Branching Advantage
+1) Branching advantage:
+- If N > n, B reproduces faster than A.
 
-If 
-N>n
-N>n, type B multiplies faster.
+2) Infection advantage:
+- A converts B to A.
+- Strength depends on:
+  - m (number of infection attempts per A node)
+  - k (how local/global infection targets are)
 
-Infection Advantage
+---
 
-Type A converts B-nodes at rate controlled by:
+## Rough Invasion Threshold (mean-field intuition)
 
-m
-m (infection attempts per A node)
+When A is rare and infection targets are approximately “well mixed”, a rough condition for A to invade is:
 
-k
-k (how globally infection spreads)
+  n * (1 + m) > N
 
-Key Insight: Invasion Condition
+Example: n = 2, N = 8
 
-When A is rare, a rough mean-field invasion criterion is:
+  2 * (1 + m) > 8
+  1 + m > 4
+  m > 3
 
-n(1+m)≳N
-n(1+m)≳N
+So you expect:
+- m <= 3: B often dominates (especially when k is small / infection is local)
+- m >= 4: A can dominate (more easily as k increases)
 
-For example, with:
+The exact boundary shifts with k because local infection can “waste” attempts by mostly hitting existing A-clusters.
 
-n=2,N=8
-n=2,N=8
+---
 
-we obtain:
+## Phase Behavior for n=2, N=8
 
-2(1+m)≳8⇒m≳3
-2(1+m)≳8⇒m≳3
+Empirically, sweeping parameters (k, m) typically shows three regimes:
 
-Interpretation:
+- B-dominant region: small m, small k
+- A-dominant region: large m and/or large k
+- transition region: near the boundary; outcomes can be sensitive to initial clustering
 
-If 
-m≤3
-m≤3: B typically dominates.
+---
 
-If 
-m≥4
-m≥4: A can dominate (especially if mixing is sufficiently global).
+## Key Takeaway
 
-This boundary shifts with 
-k
-k:
-
-Larger 
-k
-k → more global infection → easier for A to win.
-
-Smaller 
-k
-k → more local infection → harder for A to overcome B’s branching advantage.
-
-Phase Behavior (for 
-n=2,N=8
-n=2,N=8)
-
-Empirically, the system exhibits three regimes:
-
-1. B Dominance
-
-Small 
-m
-m
-
-Small 
-k
-k
-
-Infection too weak to offset branching disadvantage
-
-2. A Dominance
-
-Large 
-m
-m
-
-Or sufficiently large 
-k
-k
-
-Infection overcomes branching disadvantage
-
-3. Transitional / Mixed Regime
-
-Near the critical boundary
-
-Long transient coexistence
-
-Sensitive to initial clustering
-
-Why This Model Is Interesting
-
-This process couples:
-
-Branching processes
-
-Contagion dynamics
-
-Random-walk geometry
-
-Expanding small-world networks
-
-It creates a nontrivial phase diagram in parameter space:
-
-(m,k,n,N)
-(m,k,n,N)
-
-Even with irreversible infection, type A does not always win — dominance depends on whether infection compensates for reproductive disadvantage.
-
-Conceptual Interpretation
-
-The model can be viewed as:
-
-Evolutionary advantage vs. cultural contagion
-
-Minority ideology spreading through social mixing
-
-Innovation diffusion under demographic disadvantage
-
-Competing growth vs. conversion dynamics
-
-Core Takeaway
-
-Yes — there are parameter regimes where:
-
-Type A dominates
-
-Type B dominates
-
-Or both coexist for long periods
-
-For 
-n=2,N=8
-n=2,N=8, the rough critical infection level is:
-
-m≈4
-m≈4
-
-with the exact boundary depending on mixing 
-k
-k.
-
-The model exhibits a genuine phase transition driven by the interaction of reproduction, infection, and network mixing.
+Yes: there are parameter settings where A dominates and others where B dominates.
+For n=2, N=8, the critical infection level is roughly around m ≈ 4 under good mixing,
+with the required m increasing when infection is more local (smaller k).
