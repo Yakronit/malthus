@@ -1,276 +1,206 @@
-import argparse
 import random
-from collections import deque
-
-import matplotlib.pyplot as plt
+import math
+import numpy as np
 import networkx as nx
+import matplotlib.pyplot as plt
 
 
-# ----------------------------
-# Random-walk helpers
-# ----------------------------
-def random_walk_endpoint(G: nx.Graph, start, steps: int, rng: random.Random):
-    """Endpoint of a simple random walk of length `steps` starting at `start`."""
+# ---------- Fast adjacency utilities ----------
+def to_adjlist(G):
+    """Convert a NetworkX graph with nodes 0..n-1 into list-of-lists adjacency."""
+    n = G.number_of_nodes()
+    adj = [[] for _ in range(n)]
+    for u, v in G.edges():
+        adj[u].append(v)
+        adj[v].append(u)
+    return adj
+
+def rw_endpoint(adj, start, steps, rng):
     x = start
     for _ in range(steps):
-        nbrs = list(G.neighbors(x))
+        nbrs = adj[x]
         if not nbrs:
             break
-        x = rng.choice(nbrs)
+        x = nbrs[rng.randrange(len(nbrs))]
     return x
 
+def sp_distance_bfs(adj, s, t):
+    if s == t:
+        return 0
+    n = len(adj)
+    q = [s]
+    dist = [-1] * n
+    dist[s] = 0
+    for x in q:
+        dx = dist[x] + 1
+        for y in adj[x]:
+            if dist[y] == -1:
+                dist[y] = dx
+                if y == t:
+                    return dx
+                q.append(y)
+    return n  # fallback if disconnected
 
-def estimate_expected_distance(G: nx.Graph, steps: int, samples: int, rng: random.Random) -> float:
-    """Estimate E[d(X, Y)] where Y is endpoint of steps-walk from X, X uniform."""
-    nodes = list(G.nodes())
-    if len(nodes) < 2:
-        return 0.0
 
-    # Precompute APSP distances for speed on small graphs; fallback to single-source BFS per sample if needed.
-    # For growth this can explode; keep initial graphs modest or generations small.
-    # We'll do BFS distances per sample to avoid O(|V|^2) memory.
+# ---------- Calibrate L to hit target k on initial graph ----------
+def estimate_Edist(adj, steps, samples, rng):
+    n = len(adj)
     total = 0.0
-    used = 0
     for _ in range(samples):
-        x = rng.choice(nodes)
-        y = random_walk_endpoint(G, x, steps, rng)
-        if x == y:
-            total += 0.0
-            used += 1
-            continue
+        s = rng.randrange(n)
+        t = rw_endpoint(adj, s, steps, rng)
+        total += sp_distance_bfs(adj, s, t)
+    return total / samples
 
-        # BFS from x to get distance to y
-        dist = nx.shortest_path_length(G, source=x, target=y)
-        total += float(dist)
-        used += 1
-
-    return total / max(1, used)
-
-
-def choose_walk_length_for_k(
-    G: nx.Graph,
-    target_k: float,
-    max_steps: int,
-    samples: int,
-    rng: random.Random,
-    tol: float = 0.2,
-):
-    """
-    Choose smallest L such that estimated E[d(X, Y_L)] is close to target_k.
-    Uses a simple increasing scan.
-    """
-    best_L = 1
-    best_err = float("inf")
-    best_val = None
-
+def choose_L_for_k(adj, target_k, max_steps=30, samples=80, tol=0.35, rng=None):
+    rng = rng or random.Random(0)
+    bestL, bestErr, bestVal = 1, float("inf"), None
     for L in range(1, max_steps + 1):
-        val = estimate_expected_distance(G, L, samples=samples, rng=rng)
+        val = estimate_Edist(adj, L, samples, rng)
         err = abs(val - target_k)
-        if err < best_err:
-            best_err = err
-            best_L = L
-            best_val = val
-        # Stop early if close enough
+        if err < bestErr:
+            bestL, bestErr, bestVal = L, err, val
         if err <= tol:
             break
+    return bestL, bestVal
 
-    return best_L, best_val, best_err
 
-
-# ----------------------------
-# Model steps
-# ----------------------------
-def infect_types(
-    G: nx.Graph,
-    types: dict,
-    m: int,
-    walk_steps: int,
-    rng: random.Random,
-):
-    """
-    For each node currently type 'a', infect m targets sampled as random-walk endpoints.
-    Infection is irreversible: b -> a, a stays a.
-    """
-    a_nodes = [v for v, t in types.items() if t == "a"]
-    to_infect = set()
-
+# ---------- Model dynamics on adjacency lists ----------
+def infect(adj, types, m, L, rng):
+    # types: bytearray with 1=a, 0=b
+    n = len(adj)
+    a_nodes = [i for i in range(n) if types[i] == 1]
+    to_inf = set()
     for x in a_nodes:
         for _ in range(m):
-            y = random_walk_endpoint(G, x, walk_steps, rng)
-            to_infect.add(y)
+            y = rw_endpoint(adj, x, L, rng)
+            to_inf.add(y)
+    for y in to_inf:
+        types[y] = 1  # irreversible
 
-    for y in to_infect:
-        types[y] = "a"
-
-
-def reproduce_and_rewire_local(
-    G: nx.Graph,
-    types: dict,
-    n: int,
-    N: int,
-    rng: random.Random,
-):
-    """
-    Reproduction:
-      - each node v spawns n or N children, inheriting type
-    Locality-preserving rewiring:
-      - for each parent edge (u,v), connect each child of u to 1 random child of v
-        and each child of v to 1 random child of u.
-    """
-    offspring = {}
-    new_types = {}
+def reproduce_and_lift(adj, types, n_a, n_b, rng):
+    n = len(adj)
+    # offspring ranges
+    offspring = [None] * n
+    new_types = []
     next_id = 0
-
-    for v in G.nodes():
-        mult = n if types[v] == "a" else N
+    for v in range(n):
+        mult = n_a if types[v] == 1 else n_b
         kids = list(range(next_id, next_id + mult))
-        next_id += mult
         offspring[v] = kids
-        for c in kids:
-            new_types[c] = types[v]
+        new_types.extend([types[v]] * mult)
+        next_id += mult
 
-    G_next = nx.Graph()
-    G_next.add_nodes_from(range(next_id))
+    new_adj = [[] for _ in range(next_id)]
 
-    for (u, v) in G.edges():
-        kids_u = offspring[u]
-        kids_v = offspring[v]
+    # lift each parent edge locally
+    for u in range(n):
+        for v in adj[u]:
+            if v < u:
+                continue
+            ku, kv = offspring[u], offspring[v]
+            # each child of u connects to one random child of v
+            for cu in ku:
+                cv = kv[rng.randrange(len(kv))]
+                new_adj[cu].append(cv)
+                new_adj[cv].append(cu)
+            # each child of v connects to one random child of u
+            for cv in kv:
+                cu = ku[rng.randrange(len(ku))]
+                new_adj[cv].append(cu)
+                new_adj[cu].append(cv)
 
-        # each child of u connects to one random child of v
-        for cu in kids_u:
-            cv = rng.choice(kids_v)
-            if cu != cv:
-                G_next.add_edge(cu, cv)
+    # sibling chain to reduce fragmentation
+    idx = 0
+    for v in range(n):
+        kids = offspring[v]
+        for i in range(len(kids) - 1):
+            a = kids[i]; b = kids[i + 1]
+            new_adj[a].append(b); new_adj[b].append(a)
 
-        # each child of v connects to one random child of u
-        for cv in kids_v:
-            cu = rng.choice(kids_u)
-            if cu != cv:
-                G_next.add_edge(cu, cv)
+    return new_adj, bytearray(new_types)
 
-    # Optional: keep siblings lightly connected (helps avoid fragmentation)
-    # Comment out if you don't want it.
-    for v, kids in offspring.items():
-        if len(kids) >= 2:
-            # connect as a chain
-            for i in range(len(kids) - 1):
-                G_next.add_edge(kids[i], kids[i + 1])
-
-    # Ensure connectedness by stitching components if needed
-    if not nx.is_connected(G_next) and G_next.number_of_nodes() > 0:
-        comps = list(nx.connected_components(G_next))
-        for i in range(len(comps) - 1):
-            a = rng.choice(list(comps[i]))
-            b = rng.choice(list(comps[i + 1]))
-            G_next.add_edge(a, b)
-
-    return G_next, new_types
+def downsample(adj, types, cap, rng):
+    n = len(adj)
+    if n <= cap:
+        return adj, types
+    keep = rng.sample(range(n), cap)
+    keep_set = set(keep)
+    mapping = {old:i for i, old in enumerate(keep)}
+    new_adj = [[] for _ in range(cap)]
+    for old_u in keep:
+        u = mapping[old_u]
+        for old_v in adj[old_u]:
+            if old_v in keep_set:
+                v = mapping[old_v]
+                new_adj[u].append(v)
+    new_types = bytearray(types[old] for old in keep)
+    return new_adj, new_types
 
 
-# ----------------------------
-# Initialization
-# ----------------------------
-def make_initial_graph(num_nodes: int, mean_degree: int, p_rewire: float, seed: int):
+# ---------- One run ----------
+def one_run(k, m, generations=5, cap=800, seed=0, p_a0=0.15, mean_deg=6):
     rng = random.Random(seed)
-    k_ws = max(2, min(mean_degree, num_nodes - 1))
-    if k_ws % 2 == 1:
-        k_ws += 1
-    k_ws = min(k_ws, num_nodes - 1)
+    # initial WS graph (small-world-ish)
+    n0 = 140
+    k_ws = mean_deg + (mean_deg % 2)  # even
+    G0 = nx.watts_strogatz_graph(n0, k_ws, 0.08, seed=seed)
+    if not nx.is_connected(G0):
+        # stitch quickly
+        comps = list(nx.connected_components(G0))
+        for i in range(len(comps)-1):
+            u = rng.choice(list(comps[i])); v = rng.choice(list(comps[i+1]))
+            G0.add_edge(u, v)
 
-    G = nx.watts_strogatz_graph(num_nodes, k_ws, p_rewire, seed=seed)
+    adj = to_adjlist(G0)
+    L, est = choose_L_for_k(adj, k, rng=rng)  # calibrate once
 
-    # Ensure connected by stitching components
-    if not nx.is_connected(G):
-        comps = list(nx.connected_components(G))
-        for i in range(len(comps) - 1):
-            u = rng.choice(list(comps[i]))
-            v = rng.choice(list(comps[i + 1]))
-            G.add_edge(u, v)
-    return G
+    # types: 1=a, 0=b
+    types = bytearray(1 if rng.random() < p_a0 else 0 for _ in range(len(adj)))
 
+    for _ in range(generations):
+        infect(adj, types, m=m, L=L, rng=rng)
+        adj, types = reproduce_and_lift(adj, types, n_a=2, n_b=8, rng=rng)
+        adj, types = downsample(adj, types, cap=cap, rng=rng)
 
-def assign_initial_types(G: nx.Graph, p_a0: float, seed: int):
-    rng = random.Random(seed)
-    return {v: ("a" if rng.random() < p_a0 else "b") for v in G.nodes()}
-
-
-# ----------------------------
-# Simulation
-# ----------------------------
-def simulate(k, n, N, m, generations, num_nodes0=80, mean_degree0=6, p_rewire=0.05, p_a0=0.5,
-             seed=0, L_max=30, L_samples=400, L_tol=0.2):
-    rng = random.Random(seed)
-
-    G = make_initial_graph(num_nodes0, mean_degree0, p_rewire, seed)
-    types = assign_initial_types(G, p_a0, seed)
-
-    proportions = []
-    L_used = []
-    L_estEdist = []
-
-    for t in range(generations + 1):
-        A = sum(1 for v in types.values() if v == "a")
-        B = len(types) - A
-        proportions.append(A / (A + B) if (A + B) else 0.0)
-
-        # pick L so that E[d(x, endpoint)] ≈ k on current graph
-        L, est_val, _err = choose_walk_length_for_k(
-            G, target_k=k, max_steps=L_max, samples=L_samples, rng=rng, tol=L_tol
-        )
-        L_used.append(L)
-        L_estEdist.append(est_val)
-
-        if t == generations:
-            break
-
-        # Infection step (uses current G and types)
-        infect_types(G, types, m=m, walk_steps=L, rng=rng)
-
-        # Reproduction + locality rewiring
-        G, types = reproduce_and_rewire_local(G, types, n=n, N=N, rng=rng)
-
-    return proportions, L_used, L_estEdist
+    p = sum(types) / len(types)
+    return p, L, est
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--k", type=float, required=True, help="Target E[shortest-path distance] between start and L-step RW endpoint.")
-    ap.add_argument("--n", type=int, required=True, help="Offspring count for type a.")
-    ap.add_argument("--N", type=int, required=True, help="Offspring count for type b.")
-    ap.add_argument("--m", type=int, required=True, help="Infections per type-a node per generation.")
-    ap.add_argument("--generations", type=int, default=8)
-    ap.add_argument("--num_nodes0", type=int, default=80)
-    ap.add_argument("--mean_degree0", type=int, default=6)
-    ap.add_argument("--p_rewire", type=float, default=0.05, help="WS rewiring probability for initial graph.")
-    ap.add_argument("--p_a0", type=float, default=0.5)
-    ap.add_argument("--seed", type=int, default=0)
+# ---------- Sweep + plot ----------
+def sweep_and_plot():
+    n, N = 2, 8
+    k_values = np.linspace(1.0, 6.0, 9)   # adjust as you like
+    m_values = list(range(0, 11))         # 0..10
+    reps = 5                               # increase for smoother boundary
 
-    args = ap.parse_args()
+    mean_p = np.zeros((len(m_values), len(k_values)))
 
-    proportions, L_used, L_est = simulate(
-        k=args.k, n=args.n, N=args.N, m=args.m,
-        generations=args.generations,
-        num_nodes0=args.num_nodes0,
-        mean_degree0=args.mean_degree0,
-        p_rewire=args.p_rewire,
-        p_a0=args.p_a0,
-        seed=args.seed
-    )
+    for i, m in enumerate(m_values):
+        for j, k in enumerate(k_values):
+            ps = []
+            for r in range(reps):
+                p, L, est = one_run(k, m, generations=5, cap=800, seed=10000 + 97*r + 13*i + j)
+                ps.append(p)
+            mean_p[i, j] = float(np.mean(ps))
 
     plt.figure()
-    plt.plot(range(len(proportions)), proportions, marker="o")
-    plt.ylim(0, 1)
-    plt.xlabel("Generation t")
-    plt.ylabel("Proportion type a  (A / (A + B))")
-    plt.title(f"Type-a proportion over time (k={args.k}, n={args.n}, N={args.N}, m={args.m})")
-    plt.grid(True)
-    plt.show()
+    plt.imshow(mean_p, origin="lower", aspect="auto")
+    plt.xticks(range(len(k_values)), [f"{x:.1f}" for x in k_values], rotation=45)
+    plt.yticks(range(len(m_values)), m_values)
+    plt.xlabel("k (target expected RW distance)")
+    plt.ylabel("m (infections per a-node per generation)")
+    plt.title("Mean final p(a) after 5 generations (n=2, N=8)")
+    plt.colorbar(label="mean final p(a)")
+    plt.tight_layout()
+    plt.savefig("heatmap.png", dpi=150)
+    print("Saved heatmap.png")
 
-    # Diagnostics
-    print("t\tprop_a\tL_used\tE[d] est")
-    for t, (p, L, ed) in enumerate(zip(proportions, L_used, L_est)):
-        print(f"{t}\t{p:.4f}\t{L}\t{ed:.3f}")
-
+    # Report rough critical m per k for p(a) >= 0.5 and >= 0.9
+    for j, k in enumerate(k_values):
+        m50 = next((m_values[i] for i in range(len(m_values)) if mean_p[i, j] >= 0.5), None)
+        m90 = next((m_values[i] for i in range(len(m_values)) if mean_p[i, j] >= 0.9), None)
+        print(f"k={k:.1f}: m@0.5={m50}, m@0.9={m90}")
 
 if __name__ == "__main__":
-    main()
+    sweep_and_plot()
